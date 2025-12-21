@@ -1,79 +1,81 @@
 import os
-import requests
+import pandas as pd
 from supabase import create_client, Client
 
-# --- AUTHENTICATION ---
-# This pulls the secrets from GitHub Actions environment variables
+# --- 1. SETUP & AUTHENTICATION ---
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 
-# Safety check to prevent "Invalid URL" errors if secrets are missing
+# Fix for the "Invalid URL" crash:
+# This checks if the secrets are missing BEFORE trying to connect.
 if not SUPABASE_URL or not SUPABASE_KEY:
-    raise ValueError("❌ Error: Missing Supabase credentials. Check your GitHub Secrets (SUPABASE_URL and SUPABASE_KEY).")
+    raise ValueError("❌ CRITICAL ERROR: GitHub Secrets are missing. Please add SUPABASE_URL and SUPABASE_KEY to your Repository Secrets.")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-def get_all_us_stocks():
-    print("Fetching full list of US stocks (NASDAQ, NYSE, AMEX)...")
-    
-    # Raw list of all tickers
-    url = "https://raw.githubusercontent.com/rreichel3/US-Stock-Symbols/main/all/all_tickers.txt"
-    
+def get_sp500_stocks():
+    print("Fetching S&P 500 list from Wikipedia...")
     try:
-        response = requests.get(url)
-        symbols = response.text.splitlines()
-        # Clean the list: remove spaces and keep only valid alphabet tickers
-        clean_symbols = [s.strip() for s in symbols if s.strip().isalpha()]
+        # Pandas can read tables directly from websites
+        tables = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')
+        sp500_df = tables[0] # The first table is the S&P 500 list
         
-        print(f"✅ Found {len(clean_symbols)} US stocks.")
-        return clean_symbols
+        stock_list = []
+        for index, row in sp500_df.iterrows():
+            stock_list.append({
+                "symbol": row['Symbol'],
+                "company_name": row['Security'], # This gives the real name like "Apple Inc."
+                "market": "US"
+            })
+            
+        print(f"✅ Found {len(stock_list)} S&P 500 companies.")
+        return stock_list
     except Exception as e:
-        print(f"⚠️ Error fetching US list: {e}")
+        print(f"⚠️ Error fetching S&P 500: {e}")
         return []
 
 def seed_database():
     master_list = []
 
-    # 1. Get ALL US Stocks automatically
-    us_symbols = get_all_us_stocks()
-    for sym in us_symbols:
-        master_list.append({
-            "symbol": sym,
-            "company_name": sym, # Using symbol as placeholder name
-            "market": "US"
-        })
+    # 1. Get S&P 500 (US)
+    sp500 = get_sp500_stocks()
+    master_list.extend(sp500)
 
-    # 2. Add your Manual India/Index list here
+    # 2. Add India / Indexes (Manual List)
+    # Since there is no easy Wikipedia table for "All Nifty 500" with symbols formatted for Yahoo,
+    # we add the major ones manually here.
     manual_additions = [
-        # Indexes
-        {"symbol": "^GSPC", "name": "S&P 500", "market": "INDEX"},
-        {"symbol": "^NSEI", "name": "Nifty 50", "market": "INDEX"},
-        # India Top Stocks (Add more here as needed)
+        # Global Indexes
+        {"symbol": "^GSPC", "name": "S&P 500 Index", "market": "INDEX"},
+        {"symbol": "^NSEI", "name": "Nifty 50 Index", "market": "INDEX"},
+        
+        # India Top Stocks (You can paste more here)
         {"symbol": "RELIANCE.NS", "name": "Reliance Industries", "market": "IN"},
-        {"symbol": "TCS.NS", "name": "TCS", "market": "IN"},
+        {"symbol": "TCS.NS", "name": "Tata Consultancy Services", "market": "IN"},
         {"symbol": "HDFCBANK.NS", "name": "HDFC Bank", "market": "IN"},
         {"symbol": "INFY.NS", "name": "Infosys", "market": "IN"},
-        {"symbol": "TATAMOTORS.NS", "name": "Tata Motors", "market": "IN"}
+        {"symbol": "ICICIBANK.NS", "name": "ICICI Bank", "market": "IN"},
+        {"symbol": "HINDUNILVR.NS", "name": "Hindustan Unilever", "market": "IN"},
+        {"symbol": "ITC.NS", "name": "ITC Limited", "market": "IN"}
     ]
     
     for item in manual_additions:
         master_list.append({
             "symbol": item['symbol'],
-            "company_name": item.get('name', item['symbol']),
+            "company_name": item['name'],
             "market": item['market']
         })
 
-    # 3. Bulk Insert/Upsert into Supabase
-    print(f"🚀 Uploading {len(master_list)} profiles to Supabase...")
+    # 3. Upload to Supabase
+    print(f"🚀 Uploading {len(master_list)} profiles...")
     
-    # Upsert in chunks of 500 to prevent timeouts
-    chunk_size = 500
+    chunk_size = 100
     for i in range(0, len(master_list), chunk_size):
         chunk = master_list[i:i + chunk_size]
         try:
-            # Upsert ensures we don't create duplicates
+            # upsert=True updates the name if the symbol already exists
             supabase.table("stock_profiles").upsert(chunk, on_conflict="symbol").execute()
-            print(f"Batch {i} - {i+len(chunk)} uploaded.")
+            print(f"   Batch {i}-{i+len(chunk)} uploaded.")
         except Exception as e:
             print(f"❌ Error on batch {i}: {e}")
 
