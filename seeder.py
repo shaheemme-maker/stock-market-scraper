@@ -1,30 +1,42 @@
 import os
+import requests
 import pandas as pd
+from io import StringIO
 from supabase import create_client, Client
 
-# --- 1. SETUP & AUTHENTICATION ---
+# --- SETUP & AUTHENTICATION ---
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 
-# Fix for the "Invalid URL" crash:
-# This checks if the secrets are missing BEFORE trying to connect.
 if not SUPABASE_URL or not SUPABASE_KEY:
-    raise ValueError("❌ CRITICAL ERROR: GitHub Secrets are missing. Please add SUPABASE_URL and SUPABASE_KEY to your Repository Secrets.")
+    raise ValueError("❌ CRITICAL ERROR: GitHub Secrets are missing.")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 def get_sp500_stocks():
     print("Fetching S&P 500 list from Wikipedia...")
+    url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
+    
+    # FIX: Add a User-Agent header so Wikipedia thinks we are a browser
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    }
+
     try:
-        # Pandas can read tables directly from websites
-        tables = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')
-        sp500_df = tables[0] # The first table is the S&P 500 list
+        # 1. Fetch HTML manually with headers
+        response = requests.get(url, headers=headers)
+        response.raise_for_status() # Check for other errors
+        
+        # 2. Feed the HTML text into Pandas
+        # Wrap in StringIO because pandas expects a file-like object
+        tables = pd.read_html(StringIO(response.text))
+        sp500_df = tables[0]
         
         stock_list = []
         for index, row in sp500_df.iterrows():
             stock_list.append({
                 "symbol": row['Symbol'],
-                "company_name": row['Security'], # This gives the real name like "Apple Inc."
+                "company_name": row['Security'],
                 "market": "US"
             })
             
@@ -42,14 +54,9 @@ def seed_database():
     master_list.extend(sp500)
 
     # 2. Add India / Indexes (Manual List)
-    # Since there is no easy Wikipedia table for "All Nifty 500" with symbols formatted for Yahoo,
-    # we add the major ones manually here.
     manual_additions = [
-        # Global Indexes
         {"symbol": "^GSPC", "name": "S&P 500 Index", "market": "INDEX"},
         {"symbol": "^NSEI", "name": "Nifty 50 Index", "market": "INDEX"},
-        
-        # India Top Stocks (You can paste more here)
         {"symbol": "RELIANCE.NS", "name": "Reliance Industries", "market": "IN"},
         {"symbol": "TCS.NS", "name": "Tata Consultancy Services", "market": "IN"},
         {"symbol": "HDFCBANK.NS", "name": "HDFC Bank", "market": "IN"},
@@ -73,7 +80,6 @@ def seed_database():
     for i in range(0, len(master_list), chunk_size):
         chunk = master_list[i:i + chunk_size]
         try:
-            # upsert=True updates the name if the symbol already exists
             supabase.table("stock_profiles").upsert(chunk, on_conflict="symbol").execute()
             print(f"   Batch {i}-{i+len(chunk)} uploaded.")
         except Exception as e:
