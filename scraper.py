@@ -3,33 +3,36 @@ import yfinance as yf
 from supabase import create_client, Client
 from datetime import datetime
 
-# Config
+# --- CONFIG ---
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# List your stocks here
-STOCKS = [
-    "AAPL", "GOOGL", "MSFT",        # US Stocks
-    "RELIANCE.NS", "INFY.NS", "HDFCBANK.NS" # Indian Stocks (Note the .NS)
-]
+# Define your stocks AND their names here to keep the script fast
+STOCK_MAP = {
+    "AAPL": "Apple Inc.",
+    "GOOGL": "Alphabet Inc.",
+    "MSFT": "Microsoft Corp",
+    "TSLA": "Tesla Inc.",
+    "RELIANCE.NS": "Reliance Industries",
+    "TCS.NS": "Tata Consultancy Services",
+    "INFY.NS": "Infosys Ltd"
+}
 
 def fetch_data():
-    print(f"Fetching data for {len(STOCKS)} stocks...")
+    print(f"Fetching data for {len(STOCK_MAP)} stocks...")
     
-    # Fetch all at once
-    tickers = yf.Tickers(" ".join(STOCKS))
+    # Create a space-separated string of symbols for yfinance
+    symbols_list = list(STOCK_MAP.keys())
+    tickers = yf.Tickers(" ".join(symbols_list))
     
     payload = []
     
-    for symbol in STOCKS:
+    for symbol, company_name in STOCK_MAP.items():
         try:
+            # fast_info is very fast and reliable for prices
             ticker = tickers.tickers[symbol]
-            # 'fast_info' is faster/reliable for real-time prices
             info = ticker.fast_info 
-            
-            # Check if market is roughly active by looking at last trade time
-            # (Optional: You can skip this check if you just want to log everything)
             
             price = info.last_price
             prev_close = info.previous_close
@@ -40,6 +43,7 @@ def fetch_data():
             
             payload.append({
                 "symbol": symbol,
+                "company_name": company_name,  # Insert the name from our list
                 "price": round(price, 2),
                 "change_percent": round(change_pct, 2),
                 "change_value": round(change_value, 2),
@@ -51,12 +55,14 @@ def fetch_data():
 
     if payload:
         # Insert data
-        supabase.table("stock_prices").insert(payload).execute()
+        data, count = supabase.table("stock_prices").insert(payload).execute()
         print(f"Inserted {len(payload)} rows.")
         
-        # Cleanup old data (Auto-maintenance)
-        supabase.rpc("delete_old_prices").execute()
-        print("Cleaned up old data.")
+        # Cleanup old data (Keep DB small)
+        try:
+            supabase.rpc("delete_old_prices").execute()
+        except Exception as e:
+            print(f"Cleanup warning: {e}")
 
 if __name__ == "__main__":
     fetch_data()
