@@ -1,0 +1,28 @@
+name: Run Seeder (Manual)
+
+# This "workflow_dispatch" means it only runs when you click the button
+on: workflow_dispatch
+
+jobs:
+  seed-database:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      # Install libraries (pandas, requests, supabase)
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      # Run the seeder script securely
+      - name: Run Seeder Script
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python seeder.py
