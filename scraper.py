@@ -16,21 +16,19 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # --- HELPER: SPLIT LIST INTO CHUNKS ---
 def chunks(lst, n):
-    """Yield successive n-sized chunks from lst."""
     for i in range(0, len(lst), n):
         yield lst[i:i + n]
 
 def fetch_and_store():
     print("--- 🚀 Starting Bulk Scrape ---")
     
-    # 1. Fetch ALL symbols from the database (Pagination required for >1000 rows)
+    # 1. Fetch Symbols
     all_symbols = []
     start = 0
     fetch_size = 1000
     
     print("Reading symbols from 'stock_profiles' table...")
     while True:
-        # Fetching only the 'symbol' column to save bandwidth
         response = supabase.table("stock_profiles").select("symbol").range(start, start + fetch_size - 1).execute()
         rows = response.data
         if not rows:
@@ -41,65 +39,72 @@ def fetch_and_store():
     print(f"✅ Found {len(all_symbols)} stocks to track.")
     
     # 2. Process in batches
-    # 50 is a safe batch size for yfinance to avoid missing data
     BATCH_SIZE = 50
     total_inserted = 0
-    
-    # Use one timestamp for the entire batch so charts line up perfectly
     record_time = datetime.utcnow().isoformat()
 
     for batch in chunks(all_symbols, BATCH_SIZE):
         try:
-            tickers_str = " ".join(batch)
+            # FIX 1: Yahoo expects 'BRK-B', not 'BRK.B'. 
+            # We create a map to send correct format to Yahoo but save original format to DB.
+            yahoo_map = {s: s.replace('.', '-') if 'NS' not in s else s for s in batch}
+            # (Note: We DON'T replace dot for Indian stocks like RELIANCE.NS, only US ones)
+            
+            tickers_for_yahoo = " ".join(yahoo_map.values())
             print(f"Fetching batch: {batch[:3]}... (+{len(batch)-3} more)")
             
-            # 'download' is faster for bulk than Ticker()
-            # threads=True uses multiple cores to download faster
+            # FIX 2: Added auto_adjust=False to fix the warning and ensure stable column names
             data = yf.download(
-                tickers_str, 
+                tickers_for_yahoo, 
                 period="5d", 
                 interval="15m", 
                 progress=False, 
                 group_by='ticker',
-                threads=True 
+                threads=True,
+                auto_adjust=False 
             )
             
             payload = []
             
             for symbol in batch:
                 try:
-                    # Handle single-stock result vs multi-stock result structure
+                    yahoo_symbol = yahoo_map[symbol]
+                    
+                    # Handle structure differences
                     if len(batch) == 1:
                         stock_df = data
                     else:
-                        # Skip if symbol returned no data (delisted/error)
-                        if symbol not in data.columns.levels[0]: 
+                        if yahoo_symbol not in data.columns.levels[0]:
+                            print(f"   ⚠️ No data found for {symbol}")
                             continue
-                        stock_df = data[symbol]
+                        stock_df = data[yahoo_symbol]
                     
                     if stock_df.empty:
+                        print(f"   ⚠️ DataFrame empty for {symbol}")
                         continue
 
-                    # Get the very last row (latest 15m candle)
+                    # FIX 3: Drop Empty Rows! 
+                    # Sometimes Yahoo returns a row of NaNs at the end. We remove them.
+                    stock_df = stock_df.dropna(subset=['Close'])
+
+                    if stock_df.empty:
+                         print(f"   ⚠️ All rows were NaN for {symbol}")
+                         continue
+
+                    # Get the absolute last VALID row
                     last_candle = stock_df.iloc[-1]
                     
-                    # Check for NaN (Not a Number) which happens if market is closed/no trade
-                    if math.isnan(last_candle['Close']):
-                        continue
-
                     price = float(last_candle['Close'])
                     
-                    # Calculate change from the OPEN of this 15-minute candle
-                    # (This gives instant intraday momentum)
+                    # Calculate change
                     open_price = float(last_candle['Open'])
-                    
                     change_value = price - open_price
                     change_pct = 0.0
                     if open_price != 0:
                         change_pct = (change_value / open_price) * 100
 
                     payload.append({
-                        "symbol": symbol,
+                        "symbol": symbol, # Store the original symbol (BRK.B), not Yahoo's (BRK-B)
                         "price": round(price, 2),
                         "change_percent": round(change_pct, 2),
                         "change_value": round(change_value, 2),
@@ -107,15 +112,13 @@ def fetch_and_store():
                     })
                     
                 except Exception as inner_e:
-                    continue # One failure shouldn't crash the whole batch
+                    print(f"   ❌ Error processing {symbol}: {inner_e}")
+                    continue
 
-            # 3. Insert Batch into Supabase
             if payload:
-                # Using 'insert' because we want a history of prices
                 supabase.table("stock_prices").insert(payload).execute()
                 total_inserted += len(payload)
             
-            # Tiny sleep to be nice to Yahoo's servers
             time.sleep(0.5)
 
         except Exception as e:
@@ -123,12 +126,11 @@ def fetch_and_store():
 
     print(f"--- 🏁 Scrape Complete. Total Inserted: {total_inserted} ---")
     
-    # 4. Maintenance: Delete data older than 48 hours to save space
     try:
         supabase.rpc("delete_old_prices").execute()
         print("🧹 Cleaned up old data.")
-    except Exception as e:
-        print(f"⚠️ Cleanup warning (ignore if function doesn't exist): {e}")
+    except:
+        pass
 
 if __name__ == "__main__":
     fetch_and_store()
