@@ -1,0 +1,34 @@
+name: 15-Minute Stock Scraper
+
+on:
+  schedule:
+    # This weird string means "Every 15 minutes"
+    - cron: '*/15 * * * *'
+  # This allows you to click a button to run it manually for testing
+  workflow_dispatch:
+
+jobs:
+  scrape-data:
+    runs-on: ubuntu-latest
+    steps:
+      # 1. Download your code from the repo
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      # 2. Install Python
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      # 3. Install the libraries from requirements.txt
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      # 4. Run the script securely
+      - name: Run Scraper
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python scraper.py
