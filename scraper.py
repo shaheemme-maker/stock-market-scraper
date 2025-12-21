@@ -57,7 +57,7 @@ def fetch_and_store():
             # threads=True uses multiple cores to download faster
             data = yf.download(
                 tickers_str, 
-                period="1d", 
+                period="4d", 
                 interval="15m", 
                 progress=False, 
                 group_by='ticker',
