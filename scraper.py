@@ -51,7 +51,7 @@ def fetch_and_store():
             # Fetch 5 days to ensure we can find "Yesterday's Close"
             data = yf.download(
                 tickers_for_yahoo, 
-                period="3d", 
+                period="5d", 
                 interval="5m", 
                 progress=False, 
                 group_by='ticker',
