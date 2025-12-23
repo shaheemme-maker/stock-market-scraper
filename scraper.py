@@ -19,20 +19,29 @@ def chunks(lst, n):
         yield lst[i:i + n]
 
 def fetch_and_store():
-    print("--- 🚀 Starting Smart Scrape + History Caching ---")
+    print("--- 🚀 Starting Smart Scrape + Metadata Caching ---")
     
-    # 1. Fetch Symbols
-    all_symbols = []
+    # 1. Fetch Symbols AND Metadata (Company Name, Market)
+    all_stocks = [] # List of dictionaries: {symbol, name, market}
     start = 0
     fetch_size = 1000
+    
     while True:
-        response = supabase.table("stock_profiles").select("symbol").range(start, start + fetch_size - 1).execute()
+        # Fetching specific columns to pass to the frontend
+        response = supabase.table("stock_profiles").select("symbol, name, market").range(start, start + fetch_size - 1).execute()
         rows = response.data
         if not rows: break
-        all_symbols.extend([r['symbol'] for r in rows])
+        
+        for r in rows:
+            all_stocks.append({
+                "symbol": r['symbol'],
+                "company_name": r.get('name', ''), # Handle missing names
+                "market": r.get('market', 'US')    # Default to US
+            })
+            
         start += fetch_size
     
-    print(f"✅ Found {len(all_symbols)} stocks.")
+    print(f"✅ Found {len(all_stocks)} stocks.")
     
     # 2. Process Batch
     BATCH_SIZE = 50 
@@ -40,14 +49,20 @@ def fetch_and_store():
     
     # --- CACHE STORAGE ---
     latest_prices_cache = [] 
-    history_cache = {} # New: Dictionary to hold history for every stock
+    history_cache = {} 
 
-    for batch in chunks(all_symbols, BATCH_SIZE):
+    # Create a map for easy lookup of metadata by symbol
+    metadata_map = {s['symbol']: s for s in all_stocks}
+    
+    # Extract just the list of symbols for Yahoo
+    symbol_list = [s['symbol'] for s in all_stocks]
+
+    for batch in chunks(symbol_list, BATCH_SIZE):
         try:
             yahoo_map = {s: s.replace('.', '-') if 'NS' not in s else s for s in batch}
             tickers_for_yahoo = " ".join(yahoo_map.values())
             
-            # Fetch 5 days history (we need this for the chart anyway)
+            # Fetch 5 days history
             data = yf.download(
                 tickers_for_yahoo, 
                 period="5d",
@@ -83,8 +98,13 @@ def fetch_and_store():
                     change_value = current_price - prev_close
                     change_pct = (change_value / prev_close) * 100 if prev_close != 0 else 0.0
 
+                    # Retrieve metadata for this stock
+                    meta = metadata_map.get(symbol, {})
+
                     data_point = {
                         "symbol": symbol,
+                        "company_name": meta.get('company_name', ''), # <--- ADDED THIS
+                        "market": meta.get('market', 'US'),           # <--- ADDED THIS
                         "price": round(current_price, 2),
                         "change_percent": round(change_pct, 2),
                         "change_value": round(change_value, 2),
@@ -93,15 +113,11 @@ def fetch_and_store():
                     payload.append(data_point)
                     latest_prices_cache.append(data_point)
 
-                    # --- 2. HISTORY CHART LOGIC (NEW) ---
-                    # Get last 90 points (approx 1 trading day)
+                    # --- 2. HISTORY CHART LOGIC ---
                     history_df = stock_df.tail(90)
-                    
-                    # Format: List of [Timestamp, Price]
-                    # We use Unix Timestamp (integers) to save file size
                     chart_data = []
                     for index, row in history_df.iterrows():
-                        ts = int(index.timestamp()) # Unix Timestamp
+                        ts = int(index.timestamp())
                         price = round(float(row['Close']), 2)
                         chart_data.append([ts, price])
                     
@@ -110,9 +126,11 @@ def fetch_and_store():
                 except Exception:
                     continue
 
+            # (Optional) We still save to Supabase as backup, but frontend won't use it
             if payload:
-                # Still saving to Supabase for backup/deep history
-                supabase.table("stock_prices").upsert(payload, on_conflict="symbol, recorded_at", ignore_duplicates=False).execute()
+                # We only upsert the price fields to keep DB clean
+                db_payload = [{k: v for k, v in p.items() if k in ['symbol', 'price', 'change_percent', 'change_value', 'recorded_at']} for p in payload]
+                supabase.table("stock_prices").upsert(db_payload, on_conflict="symbol, recorded_at", ignore_duplicates=False).execute()
                 total_upserted += len(payload)
             
             time.sleep(0.5)
@@ -123,15 +141,12 @@ def fetch_and_store():
     # --- SAVE FILES ---
     print("💾 Saving JSON Caches...")
     
-    # File 1: Latest Prices (for the list)
     with open('latest_prices.json', 'w') as f:
         json.dump(latest_prices_cache, f)
 
-    # File 2: History Data (for the charts)
     with open('history.json', 'w') as f:
         json.dump(history_cache, f)
     
-    # Cleanup DB
     try: supabase.rpc("delete_old_prices").execute()
     except: pass
     
