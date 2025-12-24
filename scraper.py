@@ -11,25 +11,27 @@ from supabase import create_client, Client
 OUTPUT_DIR = "data"
 
 # 1. ENTER YOUR SUPABASE CREDENTIALS HERE
-#    (Or set them as environment variables: export SUPABASE_URL=...)
+#    (Or set them as environment variables)
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "YOUR_SUPABASE_URL_HERE")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "YOUR_SUPABASE_KEY_HERE")
-DB_TABLE_NAME = "stock_profile" # Ensure this matches your table name exactly
-DB_SYMBOL_COLUMN = "symbol"     # Ensure this matches your column name (e.g., 'ticker' or 'symbol')
+
+# --- FIX: UPDATED TABLE NAME TO PLURAL ---
+DB_TABLE_NAME = "stock_profiles" 
+DB_SYMBOL_COLUMN = "symbol"     # Check your DB: is this 'symbol' or 'ticker'?
 
 def get_db_symbols():
     """Fetches all stock symbols from Supabase, handling pagination > 1000 rows"""
     if "YOUR_SUPABASE" in SUPABASE_URL:
         print("⚠️  WARNING: Supabase credentials not set. Using fallback list.")
-        return ["AAPL", "GOOGL", "MSFT"] # Fallback if no credentials
+        return ["AAPL", "GOOGL", "MSFT"] 
 
-    print("Connecting to Supabase...")
+    print(f"Connecting to Supabase (Table: {DB_TABLE_NAME})...")
     try:
         supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
         
         all_symbols = []
         start = 0
-        batch_size = 1000 # Supabase default limit is 1000
+        batch_size = 1000 
         
         while True:
             # Fetch in batches
@@ -43,7 +45,8 @@ def get_db_symbols():
                 break
                 
             # Extract symbols from rows
-            batch_symbols = [row[DB_SYMBOL_COLUMN] for row in rows if row[DB_SYMBOL_COLUMN]]
+            # Handle case where row is None or column missing
+            batch_symbols = [row[DB_SYMBOL_COLUMN] for row in rows if row.get(DB_SYMBOL_COLUMN)]
             all_symbols.extend(batch_symbols)
             
             if len(rows) < batch_size:
@@ -65,9 +68,7 @@ def fetch_data(symbols):
 
     print(f"Fetching market data for {len(symbols)} symbols...")
     
-    # Download data for all symbols at once (1 day period, 5 minute interval)
-    # Using 'threads=True' for faster downloading
-    # Chunking: If list is huge (1200+), yfinance handles it, but splitting helps avoid URL length errors.
+    # Chunking to prevent URL too long errors
     chunk_size = 500
     all_tickers_data = {}
     
@@ -85,13 +86,12 @@ def fetch_data(symbols):
                 progress=False
             )
             
-            # Merge chunk data into main dictionary
-            # yfinance returns a DataFrame with MultiIndex if >1 ticker, or single DF if 1 ticker
             if len(chunk) == 1:
                 all_tickers_data[chunk[0]] = data
             else:
                 for sym in chunk:
                     # Check if symbol exists in columns (handling delisted/errors)
+                    # yfinance creates MultiIndex levels: (Price, Ticker)
                     if sym in data.columns.levels[0]: 
                          all_tickers_data[sym] = data[sym]
         except Exception as e:
@@ -103,17 +103,13 @@ def fetch_data(symbols):
     current_time = datetime.now(pytz.utc).isoformat()
     ny_tz = pytz.timezone('America/New_York')
     
-    # Process each symbol
     for symbol in symbols:
         try:
             if symbol not in all_tickers_data:
-                # This happens if yfinance failed to find the symbol (delisted, wrong ticker)
-                # We skip it silently or log a small warning
                 continue
                 
             ticker_data = all_tickers_data[symbol].copy()
             
-            # Skip if empty
             if ticker_data.empty or len(ticker_data) == 0:
                 continue
 
@@ -154,7 +150,7 @@ def fetch_data(symbols):
             
             stock_info = {
                 "symbol": symbol,
-                "company_name": symbol, # Ideally fetch this from DB too if available
+                "company_name": symbol, 
                 "price": round(current_price, 2),
                 "change_value": round(price_change, 2),
                 "change_percent": round(percent_change, 2),
@@ -174,7 +170,6 @@ def fetch_data(symbols):
             }
             
         except Exception as e:
-            # print(f"Error processing {symbol}: {e}") # Uncomment to debug specific stocks
             continue
             
     return latest_prices, history_data
@@ -191,7 +186,6 @@ def save_json(filename, data):
 def main():
     print(f"Starting scrape at {datetime.now()}")
     
-    # 1. Fetch symbols from Supabase
     symbols = get_db_symbols()
     
     if not symbols:
@@ -199,7 +193,6 @@ def main():
         return
 
     try:
-        # 2. Scrape data for those symbols
         latest_prices, history = fetch_data(symbols)
         
         if latest_prices:
