@@ -65,11 +65,10 @@ def fetch_and_store():
 
     for batch in chunks(symbol_list, BATCH_SIZE):
         try:
-            # We trust the DB symbols. Do NOT replace dots with dashes to support European tickers.
+            # We trust the DB symbols. Do NOT replace dots with dashes.
             tickers_for_yahoo = " ".join(batch)
             
-            # Fetch 5 days history to ensure we have enough context for "Previous Close"
-            # and to handle weekends/holidays gracefully if needed.
+            # Fetch 5 days history to ensure we have context
             data = yf.download(
                 tickers_for_yahoo, 
                 period="5d",
@@ -102,7 +101,7 @@ def fetch_and_store():
                     current_price = float(last_candle['Close'])
                     current_time = last_candle.name 
                     
-                    # Calculate Previous Close (Close of the day BEFORE the current_time)
+                    # Calculate Previous Close
                     prev_data = stock_df[stock_df.index.normalize() < current_time.normalize()]
                     prev_close = float(prev_data.iloc[-1]['Close']) if not prev_data.empty else float(stock_df.iloc[0]['Open'])
 
@@ -122,35 +121,43 @@ def fetch_and_store():
                         "price": round(current_price, 2),
                         "change_percent": round(change_pct, 2),
                         "change_value": round(change_value, 2),
-                        "previous_close": round(prev_close, 2), # Added this useful field
-                        "last_updated": current_time.to_pydatetime().isoformat(), # Renamed to standard key
+                        "previous_close": round(prev_close, 2),
+                        "last_updated": current_time.to_pydatetime().isoformat(),
                         "recorded_at": current_time.to_pydatetime().isoformat()
                     }
                     
                     payload.append(data_point)
                     latest_prices_cache.append(data_point)
 
-                    # --- 2. HISTORY CHART LOGIC (FIXED) ---
-                    # Logic: Find the date of the LAST available candle.
-                    # Filter the dataframe to include ONLY rows from that specific date.
-                    
+                    # --- 2. HISTORY CHART LOGIC (OPTIMIZED) ---
+                    # Find the date of the LAST available candle.
                     last_timestamp = stock_df.index[-1]
                     last_date = last_timestamp.date()
                     
                     # Filter for only the latest session
                     day_session_df = stock_df[stock_df.index.date == last_date]
                     
-                    chart_data = []
+                    # Resample to 5T (5 mins) and Forward Fill gaps
+                    # This creates a perfect timeline grid and fills holes with the last known price
+                    resampled_df = day_session_df['Close'].resample('5min').ffill()
                     
-                    for index, row in day_session_df.iterrows():
-                        ts = int(index.timestamp())
-                        price = round(float(row['Close']), 2)
-                        chart_data.append([ts, price])
+                    # Safety: Backfill the start if the very first 5m slot was missing
+                    resampled_df = resampled_df.bfill()
                     
-                    history_cache[symbol] = chart_data
+                    if not resampled_df.empty:
+                        # Get start timestamp (Unix integer)
+                        start_ts = int(resampled_df.index[0].timestamp())
+                        
+                        # Create simple array of prices
+                        prices_array = [round(float(p), 2) for p in resampled_df.values]
+                        
+                        # Save optimized structure
+                        history_cache[symbol] = {
+                            "s": start_ts,    # Start Timestamp
+                            "p": prices_array # Price Array
+                        }
 
                 except Exception as inner_e:
-                    # print(f"Skipping {symbol}: {inner_e}") # Optional debug
                     continue
 
             # --- UPSERT TO SUPABASE (Backup) ---
