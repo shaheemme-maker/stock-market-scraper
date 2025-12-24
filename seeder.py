@@ -42,26 +42,56 @@ def get_sp500():
 
 def get_nifty500():
     print("🇮🇳 Fetching Nifty 500 (India)...")
-    # Using the NIFTY 500 Wikipedia page which lists all 500 companies
-    df = fetch_wiki_table('https://en.wikipedia.org/wiki/NIFTY_500', 'Symbol')
-    if df is None: return []
-    
-    stocks = []
-    # Dynamic column finding to handle Wiki format changes
-    symbol_col = next((c for c in df.columns if 'Symbol' in c), 'Symbol')
-    name_col = next((c for c in df.columns if 'Company' in c), 'Company Name')
-    
-    for _, row in df.iterrows():
-        # Clean symbol and add suffix
-        raw_symbol = str(row[symbol_col]).strip()
-        symbol = f"{raw_symbol}.NS"
+    try:
+        # 1. Fetch the table
+        df = fetch_wiki_table('https://en.wikipedia.org/wiki/NIFTY_500', 'Symbol')
+        if df is None: return []
+
+        # 2. Fix Broken Headers (The cause of your error)
+        # If columns are numbers (0, 1, 2), it means the header wasn't detected.
+        # We check if the first row contains "Symbol" and promote it to header.
+        if isinstance(df.columns[0], int):
+            # Check if the first row is actually the header
+            first_row = df.iloc[0].astype(str).tolist()
+            if any('Symbol' in s for s in first_row):
+                new_header = df.iloc[0] # Grab the first row for the header
+                df = df[1:]             # Take the data less the header row
+                df.columns = new_header # Set the header row
+            else:
+                # Fallback: Wiki Nifty 500 usually has Symbol in column 1 or 2
+                print("⚠️ Header not found, assuming column 1 is Symbol.")
+                df.columns = ['Company Name', 'Symbol', 'Sector', 'a', 'b'][:len(df.columns)]
+
+        # 3. Dynamic Column Finding (Safe Version)
+        # We explicitly convert column names to string to avoid the "int" error
+        symbol_col = next((c for c in df.columns if 'Symbol' in str(c)), 'Symbol')
+        name_col = next((c for c in df.columns if 'Company' in str(c)), 'Company Name')
         
-        stocks.append({
-            "symbol": symbol,
-            "company_name": row[name_col],
-            "market": "INDIA"
-        })
-    return stocks
+        stocks = []
+        for _, row in df.iterrows():
+            try:
+                # Clean symbol
+                raw_symbol = str(row[symbol_col]).strip()
+                
+                # Skip invalid rows (e.g., repeated headers)
+                if raw_symbol.lower() == 'symbol' or pd.isna(raw_symbol): continue
+                
+                symbol = f"{raw_symbol}.NS"
+                company = str(row[name_col]).strip()
+
+                stocks.append({
+                    "symbol": symbol,
+                    "company_name": company,
+                    "market": "INDIA"
+                })
+            except Exception:
+                continue
+                
+        return stocks
+
+    except Exception as e:
+        print(f"⚠️ Nifty 500 Error: {e}")
+        return []
 
 def get_ftse100():
     print("🇬🇧 Fetching FTSE 100 (UK)...")
