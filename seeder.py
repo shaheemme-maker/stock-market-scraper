@@ -21,13 +21,14 @@ def fetch_wiki_table(url, match_text):
     try:
         response = requests.get(url, headers=HEADERS)
         response.raise_for_status()
+        # Find table containing specific text
         tables = pd.read_html(StringIO(response.text), match=match_text)
         return tables[0]
     except Exception as e:
         print(f"⚠️ Error fetching {url}: {e}")
         return None
 
-# --- REGIONAL STOCKS ---
+# --- REGIONAL FUNCTIONS ---
 
 def get_sp500():
     print("🇺🇸 Fetching S&P 500 (US)...")
@@ -39,15 +40,27 @@ def get_sp500():
         stocks.append({"symbol": symbol, "company_name": row['Security'], "market": "US"})
     return stocks
 
-def get_nifty50():
-    print("🇮🇳 Fetching Nifty 50 (India)...")
-    df = fetch_wiki_table('https://en.wikipedia.org/wiki/NIFTY_50', 'Symbol')
+def get_nifty500():
+    print("🇮🇳 Fetching Nifty 500 (India)...")
+    # Using the NIFTY 500 Wikipedia page which lists all 500 companies
+    df = fetch_wiki_table('https://en.wikipedia.org/wiki/NIFTY_500', 'Symbol')
     if df is None: return []
+    
     stocks = []
+    # Dynamic column finding to handle Wiki format changes
     symbol_col = next((c for c in df.columns if 'Symbol' in c), 'Symbol')
     name_col = next((c for c in df.columns if 'Company' in c), 'Company Name')
+    
     for _, row in df.iterrows():
-        stocks.append({"symbol": f"{row[symbol_col]}.NS", "company_name": row[name_col], "market": "INDIA"})
+        # Clean symbol and add suffix
+        raw_symbol = str(row[symbol_col]).strip()
+        symbol = f"{raw_symbol}.NS"
+        
+        stocks.append({
+            "symbol": symbol,
+            "company_name": row[name_col],
+            "market": "INDIA"
+        })
     return stocks
 
 def get_ftse100():
@@ -83,39 +96,19 @@ def get_cac40():
         stocks.append({"symbol": ticker, "company_name": row['Company'], "market": "FRANCE"})
     return stocks
 
-# --- NEW: ALL GLOBAL INDEXES ---
-
 def get_global_indexes():
     print("🌍 Adding Global Indices...")
     return [
-        # --- UNITED STATES ---
         {"symbol": "^GSPC", "company_name": "S&P 500", "market": "INDEX"},
         {"symbol": "^DJI", "company_name": "Dow Jones Industrial Average", "market": "INDEX"},
         {"symbol": "^IXIC", "company_name": "NASDAQ Composite", "market": "INDEX"},
-        {"symbol": "^RUT", "company_name": "Russell 2000", "market": "INDEX"},
-        {"symbol": "^VIX", "company_name": "CBOE Volatility Index", "market": "INDEX"},
-
-        # --- ASIA PACIFIC ---
-        {"symbol": "^NSEI", "company_name": "Nifty 50", "market": "INDEX"},  # India
-        {"symbol": "^BSESN", "company_name": "BSE SENSEX", "market": "INDEX"}, # India
-        {"symbol": "^N225", "company_name": "Nikkei 225", "market": "INDEX"}, # Japan
-        {"symbol": "^HSI", "company_name": "Hang Seng Index", "market": "INDEX"}, # Hong Kong
-        {"symbol": "000001.SS", "company_name": "SSE Composite Index", "market": "INDEX"}, # China
-        {"symbol": "^AXJO", "company_name": "S&P/ASX 200", "market": "INDEX"}, # Australia
-        {"symbol": "^KS11", "company_name": "KOSPI Composite", "market": "INDEX"}, # South Korea
-        {"symbol": "^TWII", "company_name": "TSEC weighted index", "market": "INDEX"}, # Taiwan
-
-        # --- EUROPE ---
-        {"symbol": "^FTSE", "company_name": "FTSE 100", "market": "INDEX"}, # UK
-        {"symbol": "^GDAXI", "company_name": "DAX Performance Index", "market": "INDEX"}, # Germany
-        {"symbol": "^FCHI", "company_name": "CAC 40", "market": "INDEX"}, # France
-        {"symbol": "^STOXX50E", "company_name": "ESTX 50 PR.EUR", "market": "INDEX"}, # Eurozone
-        {"symbol": "^SSMI", "company_name": "SMI PR", "market": "INDEX"}, # Switzerland
-
-        # --- AMERICAS ---
-        {"symbol": "^GSPTSE", "company_name": "S&P/TSX Composite", "market": "INDEX"}, # Canada
-        {"symbol": "^BVSP", "company_name": "IBOVESPA", "market": "INDEX"}, # Brazil
-        {"symbol": "^MXX", "company_name": "IPC MEXICO", "market": "INDEX"}, # Mexico
+        {"symbol": "^NSEI", "company_name": "Nifty 50", "market": "INDEX"},
+        {"symbol": "^BSESN", "company_name": "BSE SENSEX", "market": "INDEX"},
+        {"symbol": "^FTSE", "company_name": "FTSE 100", "market": "INDEX"},
+        {"symbol": "^GDAXI", "company_name": "DAX Performance Index", "market": "INDEX"},
+        {"symbol": "^FCHI", "company_name": "CAC 40", "market": "INDEX"},
+        {"symbol": "^N225", "company_name": "Nikkei 225", "market": "INDEX"},
+        {"symbol": "^HSI", "company_name": "Hang Seng Index", "market": "INDEX"},
     ]
 
 # --- MAIN EXECUTION ---
@@ -125,7 +118,7 @@ def seed_database():
 
     # 1. Aggregate Regional Stocks
     master_list.extend(get_sp500())
-    master_list.extend(get_nifty50())
+    master_list.extend(get_nifty500()) # <--- NOW FETCHES 500 STOCKS
     master_list.extend(get_ftse100())
     master_list.extend(get_dax40())
     master_list.extend(get_cac40())
