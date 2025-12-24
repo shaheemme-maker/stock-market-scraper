@@ -1,208 +1,42 @@
-import os
-import time
-import json
-from datetime import datetime
-import yfinance as yf
-from supabase import create_client, Client
+# In scraper.py, inside the `fetch_data` function loop:
+
 import pandas as pd
+# ... (existing imports)
 
-# --- CONFIG ---
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
-
-if not SUPABASE_URL or not SUPABASE_KEY:
-    raise ValueError("❌ CRITICAL ERROR: GitHub Secrets are missing.")
-
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-def chunks(lst, n):
-    """Helper to break list into smaller batches"""
-    for i in range(0, len(lst), n):
-        yield lst[i:i + n]
-
-def fetch_and_store():
-    print("--- 🚀 Starting Smart Scrape + Metadata Caching ---")
-    
-    # 1. Fetch Symbols AND Metadata (Company Name, Market) from Supabase
-    all_stocks = [] 
-    start = 0
-    fetch_size = 1000
-    
-    print("Fetching stock profiles from database...")
-    while True:
-        try:
-            response = supabase.table("stock_profiles").select("symbol, company_name, market").range(start, start + fetch_size - 1).execute()
-            rows = response.data
-            if not rows: break
+# ... inside the loop ...
+    try:
+        # Get data for this specific symbol
+        ticker_data = data[symbol].copy()
+        
+        # ---------------------------------------------------------
+        # NEW: NORMALIZE THE DATA (The "Easy" Way)
+        # ---------------------------------------------------------
+        if len(ticker_data) > 0:
+            # 1. Ensure we have a timezone-aware index (usually America/New_York for US)
+            if ticker_data.index.tz is None:
+                ticker_data.index = ticker_data.index.tz_localize('America/New_York')
             
-            for r in rows:
-                all_stocks.append({
-                    "symbol": r['symbol'],
-                    "company_name": r.get('company_name', r.get('symbol')),
-                    "market": r.get('market', 'US')
-                })
-                
-            start += fetch_size
-        except Exception as e:
-            print(f"⚠️ Error fetching profiles: {e}")
-            break
-    
-    print(f"✅ Found {len(all_stocks)} stocks to track.")
-    
-    # 2. Process Batch
-    BATCH_SIZE = 100 
-    total_upserted = 0
-    
-    # --- CACHE DATA STRUCTURES ---
-    latest_prices_cache = [] 
-    history_cache = {} 
-
-    # Create a map for easy lookup of metadata
-    metadata_map = {s['symbol']: s for s in all_stocks}
-    
-    # List of just the symbols to send to Yahoo
-    symbol_list = [s['symbol'] for s in all_stocks]
-
-    for batch in chunks(symbol_list, BATCH_SIZE):
-        try:
-            # We trust the DB symbols. Do NOT replace dots with dashes.
-            tickers_for_yahoo = " ".join(batch)
+            # 2. Define the full trading day (9:30 AM to 4:00 PM) for the current date
+            current_date = ticker_data.index[0].normalize()
+            market_open = current_date + pd.Timedelta(hours=9, minutes=30)
+            market_close = current_date + pd.Timedelta(hours=16, minutes=0)
             
-            # Fetch 5 days history to ensure we have context
-            data = yf.download(
-                tickers_for_yahoo, 
-                period="5d",
-                interval="5m",
-                progress=False, 
-                group_by='ticker',
-                threads=True,
-                auto_adjust=False 
-            )
+            # 3. Create a perfect 5-minute timeline
+            full_schedule = pd.date_range(start=market_open, end=market_close, freq='5min', tz=ticker_data.index.tz)
             
-            payload = []
+            # 4. Reindex: Force our data to fit this timeline
+            #    ffill(): Forward fill fills gaps with the last known price
+            ticker_data = ticker_data.reindex(full_schedule).ffill()
             
-            for symbol in batch:
-                try:
-                    # Direct mapping
-                    yahoo_symbol = symbol 
-                    
-                    # Extract dataframe for this specific stock
-                    if len(batch) == 1: stock_df = data
-                    else:
-                        if yahoo_symbol not in data.columns.levels[0]: continue
-                        stock_df = data[yahoo_symbol]
-                    
-                    if stock_df.empty: continue
-                    stock_df = stock_df.dropna(subset=['Close'])
-                    if stock_df.empty: continue
-
-                    # --- 1. LATEST PRICE LOGIC ---
-                    last_candle = stock_df.iloc[-1]
-                    current_price = float(last_candle['Close'])
-                    current_time = last_candle.name 
-                    
-                    # Calculate Previous Close
-                    prev_data = stock_df[stock_df.index.normalize() < current_time.normalize()]
-                    prev_close = float(prev_data.iloc[-1]['Close']) if not prev_data.empty else float(stock_df.iloc[0]['Open'])
-
-                    change_value = current_price - prev_close
-                    change_pct = 0.0
-                    if prev_close != 0:
-                        change_pct = (change_value / prev_close) * 100
-
-                    # Get metadata
-                    meta = metadata_map.get(symbol, {})
-
-                    # Build the data object
-                    data_point = {
-                        "symbol": symbol,
-                        "company_name": meta.get('company_name', symbol),
-                        "market": meta.get('market', 'US'),
-                        "price": round(current_price, 2),
-                        "change_percent": round(change_pct, 2),
-                        "change_value": round(change_value, 2),
-                        "previous_close": round(prev_close, 2),
-                        "last_updated": current_time.to_pydatetime().isoformat(),
-                        "recorded_at": current_time.to_pydatetime().isoformat()
-                    }
-                    
-                    payload.append(data_point)
-                    latest_prices_cache.append(data_point)
-
-                    # --- 2. HISTORY CHART LOGIC (OPTIMIZED) ---
-                    # Find the date of the LAST available candle.
-                    last_timestamp = stock_df.index[-1]
-                    last_date = last_timestamp.date()
-                    
-                    # Filter for only the latest session
-                    day_session_df = stock_df[stock_df.index.date == last_date]
-                    
-                    # Resample to 5T (5 mins) and Forward Fill gaps
-                    # This creates a perfect timeline grid and fills holes with the last known price
-                    resampled_df = day_session_df['Close'].resample('5min').ffill()
-                    
-                    # Safety: Backfill the start if the very first 5m slot was missing
-                    resampled_df = resampled_df.bfill()
-                    
-                    if not resampled_df.empty:
-                        # Get start timestamp (Unix integer)
-                        start_ts = int(resampled_df.index[0].timestamp())
-                        
-                        # Create simple array of prices
-                        prices_array = [round(float(p), 2) for p in resampled_df.values]
-                        
-                        # Save optimized structure
-                        history_cache[symbol] = {
-                            "s": start_ts,    # Start Timestamp
-                            "p": prices_array # Price Array
-                        }
-
-                except Exception as inner_e:
-                    continue
-
-            # --- UPSERT TO SUPABASE (Backup) ---
-            if payload:
-                db_payload = [
-                    {
-                        "symbol": p["symbol"],
-                        "price": p["price"],
-                        "change_percent": p["change_percent"],
-                        "change_value": p["change_value"],
-                        "recorded_at": p["recorded_at"]
-                    } 
-                    for p in payload
-                ]
-                
-                supabase.table("stock_prices").upsert(
-                    db_payload, 
-                    on_conflict="symbol, recorded_at", 
-                    ignore_duplicates=False
-                ).execute()
-                
-                total_upserted += len(payload)
+            # 5. Handle cases where data starts LATE (e.g. first trade at 9:45)
+            #    bfill(): Backfill the start using the first available price
+            ticker_data = ticker_data.bfill()
             
-            time.sleep(0.5)
+            # 6. Trim: Remove future empty points if the market is still open
+            now = pd.Timestamp.now(tz=ticker_data.index.tz)
+            ticker_data = ticker_data[ticker_data.index <= now]
+        # ---------------------------------------------------------
 
-        except Exception as e:
-            print(f"⚠️ Batch failed: {e}")
-
-    # --- SAVE JSON FILES ---
-    print("💾 Saving JSON Caches for GitHub Pages...")
-    
-    with open('latest_prices.json', 'w') as f:
-        json.dump(latest_prices_cache, f)
-
-    with open('history.json', 'w') as f:
-        json.dump(history_cache, f)
-    
-    # --- CLEANUP OLD DB DATA ---
-    print("🧹 Cleaning up old database entries...")
-    try: 
-        supabase.rpc("delete_old_prices").execute()
-    except Exception as e: 
-        print(f"Cleanup warning: {e}")
-    
-    print(f"--- 🏁 Completed. Upserted {total_upserted} candles. JSON files generated. ---")
-
-if __name__ == "__main__":
-    fetch_and_store()
+        # Continue with your existing logic, but use the normalized `ticker_data`
+        current_price = ticker_data['Close'].iloc[-1]
+        # ...
