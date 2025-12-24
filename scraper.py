@@ -29,7 +29,6 @@ def fetch_and_store():
     
     print("Fetching stock profiles from database...")
     while True:
-        # FIXED: Changed 'name' to 'company_name' to match your database schema
         try:
             response = supabase.table("stock_profiles").select("symbol, company_name, market").range(start, start + fetch_size - 1).execute()
             rows = response.data
@@ -38,7 +37,7 @@ def fetch_and_store():
             for r in rows:
                 all_stocks.append({
                     "symbol": r['symbol'],
-                    "company_name": r.get('company_name', r.get('symbol')), # Fallback to symbol if name is missing
+                    "company_name": r.get('company_name', r.get('symbol')),
                     "market": r.get('market', 'US')
                 })
                 
@@ -50,11 +49,11 @@ def fetch_and_store():
     print(f"✅ Found {len(all_stocks)} stocks to track.")
     
     # 2. Process Batch
-    BATCH_SIZE = 50 
+    # INCREASED BATCH SIZE: 100 is more efficient for 1000+ stocks
+    BATCH_SIZE = 100 
     total_upserted = 0
     
     # --- CACHE DATA STRUCTURES ---
-    # These will be saved as JSON files for the frontend
     latest_prices_cache = [] 
     history_cache = {} 
 
@@ -66,11 +65,12 @@ def fetch_and_store():
 
     for batch in chunks(symbol_list, BATCH_SIZE):
         try:
-            # Handle Indian tickers (Change .NS to -NS for Yahoo, usually not needed but good for safety)
-            yahoo_map = {s: s.replace('.', '-') if 'NS' not in s else s for s in batch}
-            tickers_for_yahoo = " ".join(yahoo_map.values())
+            # --- CRITICAL FIX BELOW ---
+            # We trust the DB symbols (seeder.py handled the formatting).
+            # We do NOT replace dots with dashes anymore, or we break European tickers (e.g. SHEL.L).
+            tickers_for_yahoo = " ".join(batch)
             
-            # Fetch 5 days history (Required for accurate calculations & charts)
+            # Fetch 5 days history
             data = yf.download(
                 tickers_for_yahoo, 
                 period="5d",
@@ -85,7 +85,8 @@ def fetch_and_store():
             
             for symbol in batch:
                 try:
-                    yahoo_symbol = yahoo_map[symbol]
+                    # Direct mapping since we didn't change the symbol
+                    yahoo_symbol = symbol 
                     
                     # Extract dataframe for this specific stock
                     if len(batch) == 1: stock_df = data
@@ -102,7 +103,6 @@ def fetch_and_store():
                     current_price = float(last_candle['Close'])
                     current_time = last_candle.name 
                     
-                    # Calculate change from previous close
                     prev_data = stock_df[stock_df.index.normalize() < current_time.normalize()]
                     prev_close = float(prev_data.iloc[-1]['Close']) if not prev_data.empty else float(stock_df.iloc[0]['Open'])
 
@@ -111,14 +111,14 @@ def fetch_and_store():
                     if prev_close != 0:
                         change_pct = (change_value / prev_close) * 100
 
-                    # Get metadata (Name, Market)
+                    # Get metadata
                     meta = metadata_map.get(symbol, {})
 
                     # Build the data object
                     data_point = {
                         "symbol": symbol,
-                        "company_name": meta.get('company_name', symbol), # Added Name
-                        "market": meta.get('market', 'US'),               # Added Market
+                        "company_name": meta.get('company_name', symbol),
+                        "market": meta.get('market', 'US'),
                         "price": round(current_price, 2),
                         "change_percent": round(change_pct, 2),
                         "change_value": round(change_value, 2),
@@ -126,27 +126,24 @@ def fetch_and_store():
                     }
                     
                     payload.append(data_point)
-                    latest_prices_cache.append(data_point) # Add to List JSON
+                    latest_prices_cache.append(data_point)
 
                     # --- 2. HISTORY CHART LOGIC ---
-                    # Get last 90 points (approx 1 trading day)
                     history_df = stock_df.tail(90)
                     chart_data = []
                     
                     for index, row in history_df.iterrows():
-                        ts = int(index.timestamp()) # Unix Timestamp
+                        ts = int(index.timestamp())
                         price = round(float(row['Close']), 2)
                         chart_data.append([ts, price])
                     
-                    history_cache[symbol] = chart_data # Add to Dictionary JSON
+                    history_cache[symbol] = chart_data
 
                 except Exception as inner_e:
                     continue
 
             # --- UPSERT TO SUPABASE (Backup) ---
             if payload:
-                # IMPORTANT: Filter out 'company_name' and 'market' before inserting to DB
-                # because the 'stock_prices' table likely doesn't have these columns.
                 db_payload = [
                     {
                         "symbol": p["symbol"],
@@ -166,7 +163,7 @@ def fetch_and_store():
                 
                 total_upserted += len(payload)
             
-            time.sleep(0.5) # Politeness delay
+            time.sleep(0.5)
 
         except Exception as e:
             print(f"⚠️ Batch failed: {e}")
@@ -174,11 +171,9 @@ def fetch_and_store():
     # --- SAVE JSON FILES ---
     print("💾 Saving JSON Caches for GitHub Pages...")
     
-    # 1. Save the List (Menu)
     with open('latest_prices.json', 'w') as f:
         json.dump(latest_prices_cache, f)
 
-    # 2. Save the Charts (History)
     with open('history.json', 'w') as f:
         json.dump(history_cache, f)
     
