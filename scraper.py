@@ -49,7 +49,6 @@ def fetch_and_store():
     print(f"✅ Found {len(all_stocks)} stocks to track.")
     
     # 2. Process Batch
-    # INCREASED BATCH SIZE: 100 is more efficient for 1000+ stocks
     BATCH_SIZE = 100 
     total_upserted = 0
     
@@ -65,12 +64,9 @@ def fetch_and_store():
 
     for batch in chunks(symbol_list, BATCH_SIZE):
         try:
-            # --- CRITICAL FIX BELOW ---
-            # We trust the DB symbols (seeder.py handled the formatting).
-            # We do NOT replace dots with dashes anymore, or we break European tickers (e.g. SHEL.L).
             tickers_for_yahoo = " ".join(batch)
             
-            # Fetch 5 days history
+            # Fetch 5 days history (we need enough buffer to ensure we catch the start of the current day)
             data = yf.download(
                 tickers_for_yahoo, 
                 period="5d",
@@ -85,7 +81,6 @@ def fetch_and_store():
             
             for symbol in batch:
                 try:
-                    # Direct mapping since we didn't change the symbol
                     yahoo_symbol = symbol 
                     
                     # Extract dataframe for this specific stock
@@ -128,8 +123,19 @@ def fetch_and_store():
                     payload.append(data_point)
                     latest_prices_cache.append(data_point)
 
-                    # --- 2. HISTORY CHART LOGIC ---
-                    history_df = stock_df.tail(90)
+                    # --- 2. HISTORY CHART LOGIC (UPDATED) ---
+                    # We only want data belonging to the LATEST available date in the dataframe.
+                    
+                    # 1. Get the timestamp of the most recent data point
+                    last_timestamp = stock_df.index[-1]
+                    
+                    # 2. Extract just the date part (e.g., 2023-10-27)
+                    last_date = last_timestamp.date()
+                    
+                    # 3. Filter the dataframe to keep ONLY rows that match this date
+                    #    This automatically drops previous days as soon as a new date appears in index[-1]
+                    history_df = stock_df[stock_df.index.date == last_date]
+                    
                     chart_data = []
                     
                     for index, row in history_df.iterrows():
@@ -142,7 +148,7 @@ def fetch_and_store():
                 except Exception as inner_e:
                     continue
 
-            # --- UPSERT TO SUPABASE (Backup) ---
+            # --- UPSERT TO SUPABASE ---
             if payload:
                 db_payload = [
                     {
