@@ -1,0 +1,5 @@
+supabase
+yfinance
+pandas
+lxml
+requests
